@@ -1,0 +1,37 @@
+{
+"maj": "2026-11-12T23:37:44.270735+00:00",
+"articles": [
+{
+"id": "2026-11-12-chute-GPN",
+"type": "chute",
+"titre": "Global Payments chute de 12 % : les fonds de rachat abandonnent les discussions",
+"chapeau": "Le spécialiste américain des paiements Global Payments (23 Md$ en Bourse) a perdu 12 % jeudi. Selon Reuters, les fonds CD&R et GTCR ont renoncé à le racheter. Pas d'impact visible sur VWRL.",
+"cree_le": "2026-11-12T23:37:44.270735+00:00",
+"edition": null
+},
+{
+"id": "2026-11-12-chute-NBIS",
+"type": "chute",
+"titre": "Nebius (IA, cloud) chute de 16,8 % après avoir réduit sa prévision 2026",
+"chapeau": "Le fournisseur de puissance de calcul pour l'IA Nebius (35 Md$ en Bourse) a perdu 16,8 % jeudi à Wall Street. Il a abaissé le haut de sa fourchette de chiffre d'affaires 2026, à cause de retards dans des centres de données. Impact très limité pour VWRL.",
+"cree_le": "2026-11-12T23:37:44.270735+00:00",
+"edition": null
+},
+{
+"id": "c-20261112-NVDA",
+"type": "chute",
+"titre": "Nvidia : −8,5 % en une semaine après la démission de Jensen Huang",
+"chapeau": "Le premier fabricant mondial de puces pour l'IA perd son fondateur dans une affaire d'espionnage présumé. L'action est survendue, mais l'incertitude est trop forte pour y voir une opportunité à court terme.",
+"cree_le": "2026-11-12T23:31:00.969262+00:00",
+"edition": null
+},
+{
+"id": "r-20261112-lancement",
+"type": "rapport",
+"titre": "Nvidia perd son patron, les taux américains s'envolent : VWRL tient bon",
+"chapeau": "La démission de Jensen Huang fait chuter Nvidia, mais le reste du marché résiste. Le vrai risque pour les jours à venir vient des taux américains, au plus haut depuis des années, et des signaux de nouvelles hausses de la Fed.",
+"cree_le": "2026-11-12T23:31:00.969262+00:00",
+"edition": "lancement"
+}
+]
+}

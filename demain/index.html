@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Demain</title>
-<meta name="description" content="Les choses à faire demain, avec priorités, sections et rappels.">
-<meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="description" content="Les choses à faire demain, sans oublier et sans reporter.">
+<meta name="theme-color" content="#F6F5F1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111111" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Demain">
@@ -14,146 +14,130 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="app">
-  <header class="head">
-    <div class="head-row">
-      <div class="seg" id="day-seg" role="tablist" aria-label="Jour">
-        <button type="button" role="tab" data-day="today">Aujourd'hui</button>
-        <button type="button" role="tab" data-day="tomorrow">Demain</button>
-      </div>
-      <button type="button" class="icon-btn" id="open-settings" aria-label="Réglages">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
-      </button>
-    </div>
-    <h1 id="title">Demain</h1>
-    <p class="subtitle" id="subtitle"></p>
-    <div class="toolbar">
-      <div class="seg small" id="view-seg" aria-label="Regrouper par">
-        <button type="button" data-view="priority">Par priorité</button>
-        <button type="button" data-view="section">Par section</button>
-      </div>
-      <span class="count" id="count"></span>
-    </div>
+  <header class="top">
+    <nav class="days" id="days" aria-label="Jour">
+      <button type="button" data-day="today">Aujourd'hui</button>
+      <button type="button" data-day="tomorrow">Demain</button>
+    </nav>
+    <button type="button" class="txt" id="open-settings">Réglages</button>
   </header>
 
-  <div id="banner"></div>
+  <section class="hero">
+    <p class="date" id="date"></p>
+    <div class="hero-row">
+      <h1 id="title">Demain, je dois</h1>
+      <p class="score" id="score" aria-label="Avancement"></p>
+    </div>
+    <div class="bar" aria-hidden="true"><i id="bar"></i></div>
+  </section>
+
+  <nav class="filters" id="filters" aria-label="Sections"></nav>
+
+  <form class="add" id="add" autocomplete="off">
+    <div class="add-line">
+      <span class="add-plus" aria-hidden="true"></span>
+      <input id="add-input" placeholder="Ajouter une tâche" aria-label="Nouvelle tâche" enterkeyhint="done">
+    </div>
+    <div class="add-opts">
+      <div class="pick" id="add-prio" aria-label="Importance">
+        <button type="button" data-v="0">Normal</button>
+        <button type="button" data-v="1">Important</button>
+        <button type="button" data-v="2">Urgent</button>
+      </div>
+      <label class="add-time">Rappel <input type="time" id="add-time" aria-label="Heure du rappel"></label>
+      <button type="submit" class="go">Ajouter</button>
+    </div>
+  </form>
+
+  <div id="nudge"></div>
   <main id="list" aria-live="polite"></main>
+</div>
 
-  <form class="quick" id="quick" autocomplete="off">
-    <span class="plus" aria-hidden="true">+</span>
-    <input id="quick-input" type="text" placeholder="Nouvelle tâche" aria-label="Nouvelle tâche" enterkeyhint="done">
-    <button type="button" class="link" id="quick-more">Détails</button>
+<!-- Panneau : modifier une tâche -->
+<div class="panel-wrap" id="task-panel" hidden>
+  <div class="scrim" data-close></div>
+  <form class="panel" id="task-form" autocomplete="off">
+    <div class="panel-top">
+      <span class="kicker">Modifier</span>
+      <button type="button" class="txt" data-close>Fermer</button>
+    </div>
+    <input class="in-title" name="title" placeholder="Tâche" required aria-label="Titre">
+    <textarea class="in-note" name="note" rows="2" placeholder="Détails (facultatif)" aria-label="Détails"></textarea>
+
+    <p class="label">Importance</p>
+    <div class="pick" id="f-prio">
+      <button type="button" data-v="0">Normal</button>
+      <button type="button" data-v="1">Important</button>
+      <button type="button" data-v="2">Urgent</button>
+    </div>
+
+    <p class="label">Rappel</p>
+    <div class="line">
+      <input type="time" name="remind" class="in-time" aria-label="Heure du rappel">
+      <button type="button" class="txt muted" id="clear-remind">Aucun rappel</button>
+    </div>
+
+    <div id="f-section-wrap">
+      <p class="label">Section</p>
+      <div class="pick wrap" id="f-section"></div>
+    </div>
+
+    <div class="panel-actions">
+      <button type="submit" class="go">Enregistrer</button>
+      <button type="button" class="txt danger" id="delete-task">Supprimer</button>
+    </div>
   </form>
 </div>
 
-<!-- Fiche tâche -->
-<div class="sheet-wrap" id="task-sheet" hidden>
+<!-- Panneau : réglages -->
+<div class="panel-wrap" id="settings-panel" hidden>
   <div class="scrim" data-close></div>
-  <form class="sheet" id="task-form" autocomplete="off">
-    <div class="sheet-bar">
-      <button type="button" class="link" data-close>Annuler</button>
-      <strong id="task-sheet-title">Nouvelle tâche</strong>
-      <button type="submit" class="link strong">OK</button>
-    </div>
-    <div class="group">
-      <input class="field big" name="title" placeholder="Titre" required>
-      <textarea class="field" name="note" rows="2" placeholder="Notes"></textarea>
+  <div class="panel">
+    <div class="panel-top">
+      <span class="kicker">Réglages</span>
+      <button type="button" class="txt" data-close>Fermer</button>
     </div>
 
-    <p class="group-label">Jour</p>
-    <div class="group pad">
-      <div class="seg full" id="f-day">
-        <button type="button" data-v="today">Aujourd'hui</button>
-        <button type="button" data-v="tomorrow">Demain</button>
-      </div>
-    </div>
-
-    <p class="group-label">Priorité</p>
-    <div class="group pad">
-      <div class="seg full" id="f-prio">
-        <button type="button" data-v="0">Aucune</button>
-        <button type="button" data-v="1">Basse</button>
-        <button type="button" data-v="2">Moyenne</button>
-        <button type="button" data-v="3">Haute</button>
-      </div>
-    </div>
-
-    <p class="group-label">Rappel</p>
-    <div class="group">
-      <label class="row">
-        <span>Me le rappeler</span>
-        <input type="checkbox" class="switch" name="hasRemind">
-      </label>
-      <label class="row" id="remind-row">
-        <span>Heure</span>
-        <input type="time" name="remind" class="time" value="08:00">
-      </label>
-    </div>
-
-    <p class="group-label">Section <span class="opt">(facultatif)</span></p>
-    <div class="group pad">
-      <div class="chips" id="f-section"></div>
-    </div>
-
-    <button type="button" class="danger" id="delete-task" hidden>Supprimer la tâche</button>
-  </form>
-</div>
-
-<!-- Réglages -->
-<div class="sheet-wrap" id="settings-sheet" hidden>
-  <div class="scrim" data-close></div>
-  <div class="sheet">
-    <div class="sheet-bar">
-      <span></span>
-      <strong>Réglages</strong>
-      <button type="button" class="link strong" data-close>OK</button>
-    </div>
-
-    <p class="group-label">Sections</p>
-    <div class="group" id="sections-list"></div>
-    <form class="group add-row" id="add-section" autocomplete="off">
-      <input class="field" name="name" placeholder="Nouvelle section (ex. Sport)" maxlength="30">
-      <button type="submit" class="link strong">Ajouter</button>
+    <h2>Sections</h2>
+    <p class="help">Facultatives. Sans section, tout est trié par importance.</p>
+    <div id="sections-list"></div>
+    <form class="line add-sec" id="add-section" autocomplete="off">
+      <input class="in-line" name="secname" placeholder="Nouvelle section" maxlength="24" aria-label="Nouvelle section">
+      <button type="submit" class="txt strong">Ajouter</button>
     </form>
-    <p class="hint">Les sections sont facultatives. Tu peux trier tes tâches par priorité et n'utiliser aucune section.</p>
 
-    <p class="group-label">Rappels sur ce PC ou ce téléphone</p>
-    <div class="group">
-      <div class="row">
-        <span>Notifications de l'appli</span>
-        <button type="button" class="link strong" id="ask-notif">Activer</button>
-      </div>
-      <label class="row">
-        <span>Heure proposée par défaut</span>
-        <input type="time" class="time" id="default-time">
-      </label>
-    </div>
-    <p class="hint">Ces notifications ne s'affichent que si l'appli est ouverte, même en arrière-plan. Pour être prévenu quand elle est fermée, utilise ntfy (juste en dessous).</p>
+    <h2>Pour ne rien oublier</h2>
+    <label class="opt">
+      <span><b>Récap du matin</b><small>La liste de ta journée, au réveil.</small></span>
+      <input type="time" class="in-time" id="morning-time">
+      <input type="checkbox" class="toggle" id="morning-on" aria-label="Activer le récap du matin">
+    </label>
+    <label class="opt">
+      <span><b>Bilan du soir</b><small>Ce qu'il te reste à faire, s'il reste quelque chose.</small></span>
+      <input type="time" class="in-time" id="evening-time">
+      <input type="checkbox" class="toggle" id="evening-on" aria-label="Activer le bilan du soir">
+    </label>
 
-    <p class="group-label">Rappels avec ntfy (appli fermée)</p>
-    <div class="group">
-      <label class="row stack">
-        <span>Sujet ntfy</span>
-        <input class="field" id="ntfy-topic" placeholder="ex. demain-7k2p9xq" spellcheck="false" autocapitalize="off">
-      </label>
-      <div class="row">
-        <span>Tester l'envoi</span>
-        <button type="button" class="link strong" id="ntfy-test">Envoyer</button>
-      </div>
+    <h2>Notifications</h2>
+    <label class="field">
+      <span>Sujet ntfy <small>(rappels même appli fermée)</small></span>
+      <input class="in-line" id="ntfy-topic" placeholder="ex. demain-7k2p9xq" spellcheck="false" autocapitalize="off">
+    </label>
+    <p class="help">Installe l'appli ntfy (iPhone, Android ou PC) et abonne-toi à ce sujet. Le texte des rappels passe par ntfy.sh : choisis un sujet difficile à deviner.</p>
+    <div class="line">
+      <button type="button" class="txt strong" id="ntfy-test">Envoyer un test</button>
+      <button type="button" class="txt strong" id="ask-notif">Notifications du navigateur</button>
     </div>
-    <p class="hint">Installe l'appli ntfy (iPhone, Android ou PC) et abonne-toi au même sujet. Chaque rappel est programmé chez ntfy et arrive à l'heure prévue, même appli fermée. Le titre de la tâche passe par ntfy.sh : choisis un sujet difficile à deviner.</p>
-
-    <p class="group-label">Calendrier</p>
-    <div class="group">
-      <div class="row">
-        <span>Exporter les rappels de demain (.ics)</span>
-        <button type="button" class="link strong" id="export-ics">Exporter</button>
-      </div>
+    <div class="line">
+      <button type="button" class="txt strong" id="export-ics">Exporter les rappels de demain (.ics)</button>
     </div>
-    <p class="hint">Ouvre le fichier pour ajouter les rappels à Calendrier, Outlook ou Google Agenda.</p>
   </div>
 </div>
 

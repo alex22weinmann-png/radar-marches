@@ -1,5 +1,5 @@
 // Demain : fonctionne hors connexion (réseau d'abord, cache en secours).
-const CACHE = "demain-v1";
+const CACHE = "demain-v2";
 const FILES = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png", "icons/apple-touch-icon.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => {

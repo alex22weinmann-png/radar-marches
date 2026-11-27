@@ -1,11 +1,10 @@
-// Demain : les choses à faire demain, avec priorités, sections et rappels.
-// Données enregistrées sur l'appareil (localStorage). Rappels : notifications locales + ntfy (programmées).
+// Demain : les choses à faire demain, sans oublier et sans reporter.
+// Données enregistrées sur l'appareil (localStorage).
+// Rappels : ntfy programmé (appli fermée), notifications du navigateur (appli ouverte), export .ics.
 "use strict";
 
 const KEY = "demain.v1";
-const COLORS = ["#007AFF", "#34C759", "#FF9500", "#FF3B30", "#AF52DE", "#FF2D55", "#5AC8FA", "#A2845E"];
-const PRIO = { 3: "Haute", 2: "Moyenne", 1: "Basse", 0: "Sans priorité" };
-const MARKS = { 3: "!!!", 2: "!!", 1: "!", 0: "" };
+const PRIO = { 0: "Normal", 1: "Important", 2: "Urgent" };
 const APP_URL = location.href.split("#")[0];
 
 const $ = s => document.querySelector(s);
@@ -15,416 +14,412 @@ const dayOffset = n => { const d = new Date(); d.setHours(12, 0, 0, 0); d.setDat
 const today = () => ymd(dayOffset(0));
 const tomorrow = () => ymd(dayOffset(1));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const plural = (n, w) => `${n} ${w}${n > 1 ? "s" : ""}`;
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
     if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (k === "style" && typeof v === "object") for (const [p, x] of Object.entries(v)) el.style.setProperty(p, x);
-    else el.setAttribute(k, v === true ? "" : v);
+    else el.setAttribute(k, v === true && !k.startsWith("aria-") ? "" : String(v));
   }
   for (const c of kids.flat()) if (c != null && c !== false) el.append(c.nodeType ? c : String(c));
   return el;
 }
 
 /* ---------- Données ---------- */
-function load() {
-  try {
-    const s = JSON.parse(localStorage.getItem(KEY));
-    if (s && Array.isArray(s.tasks)) return s;
-  } catch (e) {}
+function fresh() {
   return {
     tasks: [],
-    sections: [
-      { id: uid(), name: "Cours", color: COLORS[0] },
-      { id: uid(), name: "Projets perso", color: COLORS[4] },
-    ],
-    settings: { view: "priority", defaultTime: "08:00", ntfyTopic: "", showDone: true },
+    sections: [{ id: uid(), name: "Cours" }, { id: uid(), name: "Projets perso" }],
+    settings: { ntfyTopic: "", morning: { on: true, time: "07:30" }, evening: { on: true, time: "20:00" } },
+    recaps: {},
   };
+}
+function load() {
+  let s;
+  try { s = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
+  if (!s || !Array.isArray(s.tasks)) return fresh();
+  const d = fresh();
+  s.settings = Object.assign({}, d.settings, s.settings);
+  s.recaps = s.recaps || {};
+  s.sections = (s.sections || []).map(x => ({ id: x.id, name: x.name }));
+  s.tasks.forEach(t => { if (t.priority > 2) t.priority = 2; });  // ancienne échelle 0-3
+  return s;
 }
 const state = load();
 let tab = null;
+let filter = null;  // id de section affichée, ou null pour tout
 function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { toast("Impossible d'enregistrer sur cet appareil"); } }
 const section = id => state.sections.find(s => s.id === id);
 
-// Nettoyage quotidien : on oublie les tâches terminées des jours passés.
+// Les tâches cochées des jours passés disparaissent. Celles qui ne sont pas faites restent, en retard.
 function cleanup() {
   const t = today();
-  const before = state.tasks.length;
+  const n = state.tasks.length;
   state.tasks = state.tasks.filter(x => !(x.done && x.date < t));
-  if (state.tasks.length !== before) save();
+  for (const k of Object.keys(state.recaps)) if (k.slice(-10) < t && !state.recaps[k].ntfy) delete state.recaps[k];
+  if (state.tasks.length !== n) save();
 }
 
-function remindAt(task) {
-  if (!task.remind) return null;
-  const [y, m, d] = task.date.split("-").map(Number);
-  const [hh, mm] = task.remind.split(":").map(Number);
+function at(date, time) {
+  if (!time) return null;
+  const [y, m, d] = date.split("-").map(Number);
+  const [hh, mm] = time.split(":").map(Number);
   return new Date(y, m - 1, d, hh, mm).getTime();
 }
+const remindAt = t => at(t.date, t.remind);
+const openOn = date => state.tasks.filter(x => !x.done && (x.date === date || (date === today() && x.date < date)));
+const byPriority = (a, b) => b.priority - a.priority || (a.remind || "99").localeCompare(b.remind || "99") || a.created - b.created;
 
-/* ---------- Rappels ntfy (arrivent même appli fermée) ---------- */
-function ntfyKey(task) {
-  const at = remindAt(task);
-  if (!state.settings.ntfyTopic || task.done || !at || at < Date.now() + 15000) return "";
-  return [state.settings.ntfyTopic, at, task.title, task.note || "", task.priority].join("|");
+/* ---------- Récap du matin / bilan du soir ---------- */
+// Chaque récap porte sur un jour précis ; on prévoit celui d'aujourd'hui s'il est encore à venir, sinon celui de demain.
+function recapPlans() {
+  const plans = [];
+  for (const kind of ["morning", "evening"]) {
+    const cfg = state.settings[kind];
+    if (!cfg.on || !cfg.time) continue;
+    for (const date of [today(), tomorrow()]) {
+      const when = at(date, cfg.time);
+      if (when < Date.now() + 15000) continue;
+      const list = openOn(date).sort(byPriority);
+      const titles = list.slice(0, 6).map(t => (t.priority === 2 ? "‼ " : "– ") + t.title).join("\n") + (list.length > 6 ? `\n… et ${list.length - 6} autre(s)` : "");
+      plans.push({
+        id: `${kind}-${date}`, when, kind,
+        title: list.length ? (kind === "morning" ? `Aujourd'hui, tu dois : ${plural(list.length, "tâche")}` : `Il te reste ${plural(list.length, "tâche")}`) : "",
+        message: titles,
+        priority: list.some(t => t.priority === 2) ? 4 : 3,
+      });
+      break;
+    }
+  }
+  return plans;
 }
-async function ntfyCancel(task) {
-  const n = task.ntfy;
-  if (!n) return;
-  delete task.ntfy;
+
+/* ---------- ntfy (arrive même appli fermée) ---------- */
+async function ntfyDelete(n) {
   try { await fetch(`https://ntfy.sh/${encodeURIComponent(n.topic)}/${n.seq}`, { method: "DELETE" }); } catch (e) {}
 }
-async function ntfySync(task) {
-  const key = ntfyKey(task);
-  if ((task.ntfy && task.ntfy.key) === key && !task.ntfyPending) return;
-  await ntfyCancel(task);
-  task.ntfyPending = false;
+// holder = objet qui garde la trace de la notification programmée ; msg = null pour annuler.
+async function ntfyPlan(holder, baseId, msg) {
+  const topic = state.settings.ntfyTopic;
+  const key = topic && msg ? [topic, msg.when, msg.title, msg.message, msg.priority].join("|") : "";
+  if ((holder.ntfy ? holder.ntfy.key : "") === key && !holder.ntfyPending) return;
+  if (holder.ntfy) { const old = holder.ntfy; delete holder.ntfy; ntfyDelete(old); }
+  holder.ntfyPending = false;
   if (key) {
-    const seq = `${task.id}-${Date.now().toString(36)}`;
-    const sec = section(task.section);
+    const seq = `${baseId}-${Date.now().toString(36)}`.replace(/[^-_A-Za-z0-9]/g, "").slice(0, 64);
     try {
       const r = await fetch("https://ntfy.sh/", {
         method: "POST",
-        body: JSON.stringify({
-          topic: state.settings.ntfyTopic,
-          title: (MARKS[task.priority] ? MARKS[task.priority] + " " : "") + task.title,
-          message: [task.note, sec && sec.name].filter(Boolean).join(" · ") || "Rappel de ta liste Demain",
-          delay: String(Math.floor(remindAt(task) / 1000)),
-          sequence_id: seq,
-          priority: task.priority === 3 ? 4 : 3,
-          tags: ["alarm_clock"],
-          click: APP_URL,
-        }),
+        body: JSON.stringify({ topic, title: msg.title, message: msg.message, delay: String(Math.floor(msg.when / 1000)),
+          sequence_id: seq, priority: msg.priority, tags: [msg.tag || "pushpin"], click: APP_URL }),
       });
       if (!r.ok) throw new Error(r.status);
-      task.ntfy = { topic: state.settings.ntfyTopic, seq, key };
-    } catch (e) {
-      task.ntfyPending = true;
-    }
+      holder.ntfy = { topic, seq, key };
+    } catch (e) { holder.ntfyPending = true; }
   }
   save();
 }
-const ntfySyncAll = () => Promise.all(state.tasks.map(ntfySync));
+function taskMsg(t) {
+  const when = remindAt(t);
+  if (t.done || !when || when < Date.now() + 15000) return null;
+  const sec = section(t.section);
+  return { when, title: (t.priority === 2 ? "‼ " : "") + t.title,
+    message: [t.note, sec && sec.name, t.priority ? PRIO[t.priority] : ""].filter(Boolean).join(" · ") || "À faire maintenant",
+    priority: t.priority === 2 ? 5 : t.priority === 1 ? 4 : 3, tag: "alarm_clock" };
+}
+let syncTimer = null;
+function syncAll() {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(async () => {
+    await Promise.all(state.tasks.map(t => ntfyPlan(t, t.id, taskMsg(t))));
+    const plans = recapPlans();
+    const wanted = new Set(plans.map(p => p.id));
+    for (const [id, holder] of Object.entries(state.recaps)) if (!wanted.has(id)) { await ntfyPlan(holder, id, null); delete state.recaps[id]; }
+    for (const p of plans) {
+      const holder = state.recaps[p.id] = state.recaps[p.id] || {};
+      await ntfyPlan(holder, p.id, p.title ? p : null);
+    }
+    save();
+    scheduleLocal();
+  }, 400);
+}
 
-/* ---------- Rappels locaux (appli ouverte) ---------- */
+/* ---------- Notifications du navigateur (appli ouverte) ---------- */
 let timers = [];
 function scheduleLocal() {
   timers.forEach(clearTimeout);
   timers = [];
   const now = Date.now();
+  const jobs = [];
   for (const t of state.tasks) {
-    const at = remindAt(t);
-    if (!at || t.done || t.notified) continue;
-    if (at <= now) {
-      if (now - at < 30 * 60 * 1000) fire(t);  // rappel manqué il y a moins de 30 min
-      continue;
-    }
-    if (at - now < 2 ** 31 - 1) timers.push(setTimeout(() => fire(t), at - now));
+    const m = taskMsg(t) || (!t.done && remindAt(t) && now - remindAt(t) < 30 * 60000 ? { when: remindAt(t), title: t.title, message: t.note || "À faire maintenant" } : null);
+    if (m && !t.notified && !t.ntfy) jobs.push([m, () => { t.notified = true; save(); }]);
+  }
+  for (const p of recapPlans()) {
+    const holder = state.recaps[p.id];
+    if (p.title && !(holder && (holder.ntfy || holder.fired))) jobs.push([p, () => { state.recaps[p.id] = Object.assign(holder || {}, { fired: true }); save(); }]);
+  }
+  for (const [m, mark] of jobs) {
+    const delay = Math.max(0, m.when - now);
+    if (delay < 2 ** 31 - 1) timers.push(setTimeout(() => { mark(); notify(m.title, m.message); }, delay));
   }
 }
-async function fire(task) {
-  if (task.done || task.notified) return;
-  task.notified = true;
-  save();
-  const body = [task.note, section(task.section) && section(task.section).name].filter(Boolean).join(" · ");
-  // Si ntfy est configuré, il s'en charge déjà ; on évite la double notification.
-  if (task.ntfy) { if (document.visibilityState === "visible") toast("⏰ " + task.title); return; }
+async function notify(title, body) {
   if ("Notification" in window && Notification.permission === "granted") {
     try {
       const reg = await navigator.serviceWorker?.getRegistration();
-      if (reg) reg.showNotification(task.title, { body: body || "Rappel", tag: task.id, icon: "icons/icon-192.png", badge: "icons/icon-192.png" });
-      else new Notification(task.title, { body: body || "Rappel", tag: task.id });
-      return;
+      if (reg) { reg.showNotification(title, { body, icon: "icons/icon-192.png", requireInteraction: true }); return; }
+      new Notification(title, { body }); return;
     } catch (e) {}
   }
-  toast("⏰ " + task.title);
+  toast(title);
 }
 
-function afterChange(task) {
-  save();
-  render();
-  if (task) ntfySync(task);
-}
+function changed() { save(); render(); syncAll(); }
 
 /* ---------- Affichage ---------- */
-function visibleTasks() {
-  const t = today();
-  if (tab === "tomorrow") return state.tasks.filter(x => x.date === tomorrow());
-  return state.tasks.filter(x => x.date === t || (x.date < t && !x.done));
-}
-const sortTasks = list => list.sort((a, b) =>
-  b.priority - a.priority || (a.remind || "99").localeCompare(b.remind || "99") || a.created - b.created);
-
-function render() {
-  const d = tab === "tomorrow" ? dayOffset(1) : dayOffset(0);
-  $("#title").textContent = tab === "tomorrow" ? "Demain" : "Aujourd'hui";
-  $("#subtitle").textContent = d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
-  document.title = tab === "tomorrow" ? "Demain" : "Aujourd'hui";
-  document.querySelectorAll("#day-seg button").forEach(b => b.setAttribute("aria-selected", b.dataset.day === tab));
-  document.querySelectorAll("#view-seg button").forEach(b => b.setAttribute("aria-selected", b.dataset.view === state.settings.view));
-  $("#view-seg").hidden = state.sections.length === 0;
-
-  const list = visibleTasks();
-  const open = sortTasks(list.filter(x => !x.done));
-  const done = list.filter(x => x.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
-  $("#count").textContent = list.length ? (open.length ? `${open.length} à faire` : "Tout est fait") : "";
-
-  renderBanner();
-
-  const main = $("#list");
-  main.replaceChildren();
-  if (!list.length) {
-    main.append(h("div", { class: "empty" },
-      h("b", {}, tab === "tomorrow" ? "Rien de prévu pour demain" : "Rien pour aujourd'hui"),
-      tab === "tomorrow" ? "Ajoute ce que tu dois faire demain dans le champ en bas." : "Les tâches que tu prépares la veille arrivent ici le lendemain."));
-    return;
-  }
-
-  const groups = [];
-  if (state.settings.view === "section" && state.sections.length) {
-    for (const s of state.sections) groups.push({ name: s.name, color: s.color, items: open.filter(x => x.section === s.id) });
-    groups.push({ name: "Sans section", items: open.filter(x => !section(x.section)) });
-  } else {
-    for (const p of [3, 2, 1, 0]) groups.push({ name: PRIO[p], prio: p, items: open.filter(x => x.priority === p) });
-  }
-  for (const g of groups) {
-    if (!g.items.length) continue;
-    main.append(h("section", { class: "section" },
-      h("div", { class: "section-head" },
-        g.color ? h("span", { class: "tag", style: { background: g.color } }) : null,
-        g.prio ? h("span", { class: `prio p${g.prio}` }, MARKS[g.prio]) : null,
-        g.name, h("span", { class: "n" }, g.items.length)),
-      h("div", { class: "card" }, g.items.map(taskRow))));
-  }
-  if (done.length) {
-    const show = state.settings.showDone;
-    main.append(h("section", { class: "section" },
-      h("div", { class: "section-head" }, "Terminées",
-        h("button", { class: "toggle", type: "button", onclick: () => { state.settings.showDone = !show; save(); render(); } },
-          show ? "Masquer" : `Afficher (${done.length})`)),
-      show ? h("div", { class: "card" }, done.map(taskRow)) : null));
-  }
-}
-
-const bell = () => {
+const check = () => {
   const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   s.setAttribute("viewBox", "0 0 24 24");
-  s.innerHTML = '<circle cx="12" cy="13" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 9v4l2.5 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
+  s.innerHTML = '<path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>';
   return s;
 };
 
-function taskRow(t) {
+function render() {
+  const isT = tab === "tomorrow";
+  const t0 = today();
+  document.querySelectorAll("#days button").forEach(b => b.setAttribute("aria-current", b.dataset.day === tab));
+  $("#date").textContent = (isT ? dayOffset(1) : dayOffset(0)).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+
+  if (filter && !section(filter)) filter = null;
+  const inFilter = x => !filter || x.section === filter;
+  const all = state.tasks.filter(x => isT ? x.date === tomorrow() : (x.date === t0 || (x.date < t0 && !x.done)));
+  const shown = all.filter(inFilter);
+  const doneN = all.filter(x => x.done).length;
+
+  const allDone = all.length && doneN === all.length;
+  $("#title").textContent = (isT ? "Demain" : "Aujourd'hui") + (allDone ? ", c'est fait." : ", je dois");
+  document.title = isT ? "Demain" : "Aujourd'hui";
+  const score = $("#score");
+  score.replaceChildren();
+  if (all.length) score.append(h("b", {}, doneN), "/" + all.length);
+  $("#bar").style.width = all.length ? (doneN / all.length * 100) + "%" : "0";
+
+  // Filtres de section
+  const fl = $("#filters");
+  fl.replaceChildren();
+  if (state.sections.length) {
+    const used = new Set(all.map(x => x.section));
+    fl.append(h("button", { type: "button", "aria-pressed": !filter, onclick: () => { filter = null; render(); } }, "Tout"),
+      ...state.sections.filter(s => used.has(s.id) || filter === s.id).map(s =>
+        h("button", { type: "button", "aria-pressed": filter === s.id, onclick: () => { filter = filter === s.id ? null : s.id; render(); } }, s.name)));
+    if (fl.children.length < 2) fl.replaceChildren();
+  }
+
+  // Sur « Demain » : ce qui reste aujourd'hui doit être fait, pas reporté.
+  const nudge = $("#nudge");
+  nudge.replaceChildren();
+  const left = openOn(t0).length;
+  if (isT && left) nudge.append(h("div", { class: "nudge" },
+    h("span", {}, `Il te reste ${plural(left, "tâche")} aujourd'hui.`),
+    h("button", { type: "button", onclick: () => { tab = "today"; render(); } }, "Voir →")));
+
+  const main = $("#list");
+  main.replaceChildren();
+  if (!shown.length) {
+    main.append(h("div", { class: "empty" },
+      h("b", {}, isT ? "Rien de prévu pour demain." : "Rien pour aujourd'hui."),
+      isT ? "Note ici tout ce que tu dois faire demain." : "Prépare ta journée la veille, dans l'onglet Demain."));
+    return;
+  }
+  const late = shown.filter(x => !x.done && x.date < t0).sort(byPriority);
+  const open = shown.filter(x => !x.done && x.date >= t0).sort(byPriority);
+  const done = shown.filter(x => x.done).sort((a, b) => (a.doneAt || 0) - (b.doneAt || 0));
+  let n = 0;
+  if (late.length) {
+    main.append(h("p", { class: "group-title hot" }, `En retard · ${late.length}`));
+    late.forEach(t => main.append(row(t, ++n)));
+    if (open.length) main.append(h("p", { class: "group-title" }, "Prévu aujourd'hui"));
+  }
+  open.forEach(t => main.append(row(t, ++n)));
+  if (done.length) {
+    main.append(h("p", { class: "group-title" }, `Fait · ${done.length}`));
+    done.forEach(t => main.append(row(t, ++n)));
+  }
+}
+
+function row(t, n) {
   const sec = section(t.section);
   const late = !t.done && t.date < today();
-  const showSec = sec && state.settings.view !== "section";
-  const row = h("div", { class: "task" + (t.done ? " done" : ""), style: sec ? { "--ring": sec.color } : null },
-    h("button", { class: "check", type: "button", "aria-label": (t.done ? "Rouvrir : " : "Terminer : ") + t.title, onclick: () => toggle(t, row) }),
-    h("div", { class: "body", onclick: () => openTask(t) },
+  const meta = [
+    late ? h("span", { class: "late" }, "Pas fait " + (t.date === ymd(dayOffset(-1)) ? "hier" : "le " + new Date(t.date + "T12:00").toLocaleDateString("fr-FR", { day: "numeric", month: "short" }))) : null,
+    t.remind ? h("span", {}, "Rappel " + t.remind.replace(":", " h ")) : null,
+    sec && !filter ? h("span", {}, sec.name) : null,
+  ].filter(Boolean);
+  const el = h("div", { class: `task p${t.priority}` + (t.done ? " done" : "") + (late ? " late" : ""), "data-id": t.id },
+    h("span", { class: "num" }, pad(n)),
+    h("div", { class: "t-main", onclick: () => openTask(t), role: "button", tabindex: 0,
+      onkeydown: e => { if (e.key === "Enter") openTask(t); } },
       h("div", { class: "t-title" }, t.title),
       t.note ? h("div", { class: "t-note" }, t.note) : null,
-      (t.remind || late || showSec) ? h("div", { class: "meta" },
-        late ? h("span", { class: "late" }, "En retard") : null,
-        t.remind ? h("span", {}, bell(), t.remind.replace(":", " h ")) : null,
-        showSec ? h("span", { class: "sec", style: { "--c": sec.color } }, h("i"), sec.name) : null) : null),
-    t.priority ? h("span", { class: `prio p${t.priority}`, "aria-label": "Priorité " + PRIO[t.priority].toLowerCase() }, MARKS[t.priority]) : null);
-  return row;
+      meta.length ? h("div", { class: "t-meta" }, meta) : null),
+    t.priority ? h("span", { class: `tag p${t.priority}` }, PRIO[t.priority]) : h("span"),
+    h("button", { class: "box", type: "button", "aria-pressed": t.done, "aria-label": (t.done ? "Décocher : " : "Fait : ") + t.title,
+      onclick: () => toggle(t, el) }, check()));
+  return el;
 }
 
 let toggleTimer = null;
-function toggle(t, row) {
+function toggle(t, el) {
   t.done = !t.done;
   t.doneAt = t.done ? Date.now() : null;
-  row.classList.toggle("done", t.done);
+  if (t.done && t.date < today()) t.date = today();  // une tâche en retard enfin faite compte pour aujourd'hui
+  el.classList.toggle("done", t.done);
   save();
-  ntfySync(t);
-  scheduleLocal();
+  syncAll();
   clearTimeout(toggleTimer);
-  toggleTimer = setTimeout(render, t.done ? 650 : 0);  // laisse voir la coche avant de ranger la tâche
+  toggleTimer = setTimeout(render, t.done ? 500 : 0);
+  if (t.done && openOn(today()).length === 0 && tab === "today") setTimeout(() => toast("Tout est fait pour aujourd'hui."), 550);
 }
 
-function renderBanner() {
-  const b = $("#banner");
-  b.replaceChildren();
-  const t = today();
-  const pending = tab === "tomorrow"
-    ? state.tasks.filter(x => !x.done && x.date <= t)
-    : state.tasks.filter(x => !x.done && x.date < t);
-  if (!pending.length || (tab === "tomorrow" && new Date().getHours() < 16)) return;
-  const n = pending.length;
-  b.append(h("div", { class: "banner" },
-    h("span", {}, tab === "tomorrow"
-      ? `${n} tâche${n > 1 ? "s" : ""} pas encore faite${n > 1 ? "s" : ""} aujourd'hui.`
-      : `${n} tâche${n > 1 ? "s" : ""} en retard.`),
-    h("button", { class: "link strong", type: "button", onclick: () => moveToTomorrow(pending) }, "Reporter à demain")));
-}
-function moveToTomorrow(list) {
-  const d = tomorrow();
-  list.forEach(x => { x.date = d; x.notified = false; ntfySync(x); });
-  save(); render(); scheduleLocal();
-  toast(list.length > 1 ? `${list.length} tâches reportées à demain` : "Tâche reportée à demain");
-}
-
-/* ---------- Fiche tâche ---------- */
-let editing = null;   // tâche modifiée, ou null pour une nouvelle
-let form = {};
-
-function segPick(sel, value) {
-  document.querySelectorAll(sel + " button").forEach(b => b.setAttribute("aria-selected", b.dataset.v === String(value)));
-}
-function renderChips() {
-  const box = $("#f-section");
-  box.replaceChildren(
-    h("button", { type: "button", class: "chip", "aria-pressed": !form.section, onclick: () => { form.section = null; renderChips(); } }, "Aucune"),
-    ...state.sections.map(s => h("button", { type: "button", class: "chip", style: { "--c": s.color }, "aria-pressed": form.section === s.id,
-      onclick: () => { form.section = s.id; renderChips(); } }, h("i"), s.name)),
-    h("button", { type: "button", class: "chip", onclick: () => { closeSheet("#task-sheet"); openSettings(); } }, "Gérer…"));
+/* ---------- Ajout ---------- */
+let addPrio = 0;
+const pick = (sel, v) => document.querySelectorAll(sel + " button").forEach(b => b.setAttribute("aria-pressed", b.dataset.v === String(v)));
+const addForm = $("#add");
+const addInput = $("#add-input");
+function resetAdd() { addInput.value = ""; addPrio = 0; pick("#add-prio", 0); $("#add-time").value = ""; addForm.classList.remove("open"); }
+addInput.addEventListener("input", () => addForm.classList.toggle("open", addInput.value.trim() !== ""));
+$("#add-prio").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { addPrio = +b.dataset.v; pick("#add-prio", addPrio); addInput.focus(); } });
+addForm.addEventListener("submit", e => {
+  e.preventDefault();
+  const title = addInput.value.trim();
+  if (!title) { addInput.focus(); return; }
+  const t = { id: uid(), created: Date.now(), done: false, title, note: "", priority: addPrio, section: filter,
+    date: tab === "tomorrow" ? tomorrow() : today(), remind: $("#add-time").value || null };
+  state.tasks.push(t);
+  resetAdd();
+  addInput.focus();
+  changed();
+  if (t.remind && remindAt(t) < Date.now()) toast("L'heure du rappel est déjà passée");
+  else if (t.remind && !state.settings.ntfyTopic) hintOnce();
+  const el = document.querySelector(`[data-id="${t.id}"]`);
+  if (el) el.classList.add("flash");
+});
+function hintOnce() {
+  try { if (localStorage.getItem("demain.hinted")) return; localStorage.setItem("demain.hinted", "1"); } catch (e) {}
+  toast("Pour recevoir les rappels appli fermée, configure ntfy dans Réglages");
 }
 
-function openTask(task, presetTitle) {
-  editing = task || null;
+/* ---------- Modifier une tâche ---------- */
+let editing = null, form = {};
+function renderSecPick() {
+  $("#f-section-wrap").hidden = !state.sections.length;
+  $("#f-section").replaceChildren(
+    h("button", { type: "button", "aria-pressed": !form.section, onclick: () => { form.section = null; renderSecPick(); } }, "Aucune"),
+    ...state.sections.map(s => h("button", { type: "button", "aria-pressed": form.section === s.id, onclick: () => { form.section = s.id; renderSecPick(); } }, s.name)));
+}
+function openTask(t) {
+  editing = t;
+  form = { priority: t.priority, section: section(t.section) ? t.section : null };
   const f = $("#task-form");
-  form = {
-    day: task ? (task.date <= today() ? "today" : "tomorrow") : tab,
-    priority: task ? task.priority : 0,
-    section: task ? (section(task.section) ? task.section : null) : null,
-  };
-  f.title.value = task ? task.title : (presetTitle || "");
-  f.note.value = task ? (task.note || "") : "";
-  f.hasRemind.checked = !!(task && task.remind);
-  f.remind.value = (task && task.remind) || state.settings.defaultTime || "08:00";
-  $("#remind-row").hidden = !f.hasRemind.checked;
-  $("#task-sheet-title").textContent = task ? "Modifier" : "Nouvelle tâche";
-  $("#delete-task").hidden = !task;
-  segPick("#f-day", form.day);
-  segPick("#f-prio", form.priority);
-  renderChips();
-  openSheet("#task-sheet");
-  if (!task) setTimeout(() => f.title.focus(), 60);
+  f.elements.title.value = t.title;
+  f.elements.note.value = t.note || "";
+  f.elements.remind.value = t.remind || "";
+  pick("#f-prio", form.priority);
+  renderSecPick();
+  openPanel("#task-panel");
 }
-
-$("#f-day").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { form.day = b.dataset.v; segPick("#f-day", form.day); } });
-$("#f-prio").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { form.priority = +b.dataset.v; segPick("#f-prio", form.priority); } });
-$("#task-form").hasRemind.addEventListener("change", e => { $("#remind-row").hidden = !e.target.checked; });
-
+$("#f-prio").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { form.priority = +b.dataset.v; pick("#f-prio", form.priority); } });
+$("#clear-remind").addEventListener("click", () => { $("#task-form").elements.remind.value = ""; });
 $("#task-form").addEventListener("submit", e => {
   e.preventDefault();
-  const f = e.target;
+  const f = e.target.elements;
   const title = f.title.value.trim();
   if (!title) { f.title.focus(); return; }
-  const t = editing || { id: uid(), created: Date.now(), done: false };
-  const newDate = form.day === "today" ? (editing && editing.date < today() ? editing.date : today()) : tomorrow();
-  const newRemind = f.hasRemind.checked ? f.remind.value || null : null;
-  if (t.date !== newDate || t.remind !== newRemind) t.notified = false;
-  Object.assign(t, { title, note: f.note.value.trim(), priority: form.priority, section: form.section, date: newDate, remind: newRemind });
-  if (!editing) state.tasks.push(t);
-  closeSheet("#task-sheet");
-  afterChange(t);
-  scheduleLocal();
-  const at = remindAt(t);
-  if (at && at < Date.now()) toast("Attention : l'heure du rappel est déjà passée");
-  else if (at && !state.settings.ntfyTopic && !("Notification" in window && Notification.permission === "granted") && !localStorage.getItem("demain.hinted")) {
-    try { localStorage.setItem("demain.hinted", "1"); } catch (e) {}
-    toast("Active les rappels dans Réglages pour être prévenu");
-  }
+  const remind = f.remind.value || null;
+  if (remind !== editing.remind) editing.notified = false;
+  Object.assign(editing, { title, note: f.note.value.trim(), priority: form.priority, section: form.section, remind });
+  closePanel("#task-panel");
+  changed();
+  if (remind && remindAt(editing) < Date.now()) toast("L'heure du rappel est déjà passée");
 });
-
 $("#delete-task").addEventListener("click", () => {
   if (!editing || !confirm(`Supprimer « ${editing.title} » ?`)) return;
   const t = editing;
-  ntfyCancel(t);
+  if (t.ntfy) ntfyDelete(t.ntfy);
   state.tasks = state.tasks.filter(x => x !== t);
-  closeSheet("#task-sheet");
-  save(); render(); scheduleLocal();
+  closePanel("#task-panel");
+  changed();
 });
 
-/* ---------- Saisie rapide ---------- */
-$("#quick").addEventListener("submit", e => {
-  e.preventDefault();
-  const input = $("#quick-input");
-  const title = input.value.trim();
-  if (!title) return;
-  const t = { id: uid(), created: Date.now(), done: false, title, note: "", priority: 0, section: null, date: tab === "tomorrow" ? tomorrow() : today(), remind: null };
-  state.tasks.push(t);
-  input.value = "";
-  afterChange(t);
-});
-$("#quick-more").addEventListener("click", () => { const v = $("#quick-input").value.trim(); $("#quick-input").value = ""; openTask(null, v); });
-
-/* ---------- Fiches ---------- */
-function openSheet(sel) { $(sel).hidden = false; document.body.style.overflow = "hidden"; }
-function closeSheet(sel) { $(sel).hidden = true; if (document.querySelectorAll(".sheet-wrap:not([hidden])").length === 0) document.body.style.overflow = ""; }
-document.querySelectorAll(".sheet-wrap").forEach(w => w.addEventListener("click", e => {
-  if (e.target.closest("[data-close]")) { closeSheet("#" + w.id); if (w.id === "settings-sheet") render(); }
+/* ---------- Panneaux ---------- */
+function openPanel(sel) { $(sel).hidden = false; document.body.style.overflow = "hidden"; }
+function closePanel(sel) { $(sel).hidden = true; if (!document.querySelector(".panel-wrap:not([hidden])")) document.body.style.overflow = ""; }
+document.querySelectorAll(".panel-wrap").forEach(w => w.addEventListener("click", e => {
+  if (e.target.closest("[data-close]")) { closePanel("#" + w.id); render(); }
 }));
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") document.querySelectorAll(".sheet-wrap:not([hidden])").forEach(w => { closeSheet("#" + w.id); render(); });
-  if (e.key === "n" && !e.metaKey && !e.ctrlKey && !/INPUT|TEXTAREA/.test(document.activeElement.tagName) && !document.querySelector(".sheet-wrap:not([hidden])")) {
-    e.preventDefault(); $("#quick-input").focus();
+  if (e.key === "Escape") { document.querySelectorAll(".panel-wrap:not([hidden])").forEach(w => closePanel("#" + w.id)); render(); }
+  if (e.key === "n" && !e.metaKey && !e.ctrlKey && !/INPUT|TEXTAREA/.test(document.activeElement.tagName) && !document.querySelector(".panel-wrap:not([hidden])")) {
+    e.preventDefault(); addInput.focus();
   }
 });
 
 /* ---------- Réglages ---------- */
-let paletteFor = null;
 function renderSections() {
   const box = $("#sections-list");
-  box.replaceChildren();
-  if (!state.sections.length) { box.append(h("div", { class: "empty-sec" }, "Aucune section. Tes tâches sont rangées par priorité.")); return; }
-  for (const s of state.sections) {
-    box.append(h("div", { class: "sec-row" },
-      h("button", { type: "button", class: "dot", style: { "--c": s.color }, "aria-label": "Couleur de " + s.name,
-        onclick: () => { paletteFor = paletteFor === s.id ? null : s.id; renderSections(); } }),
-      h("input", { value: s.name, maxlength: 30, "aria-label": "Nom de la section",
+  box.replaceChildren(...state.sections.map(s => {
+    const n = state.tasks.filter(x => x.section === s.id && !x.done).length;
+    return h("div", { class: "sec-row" },
+      h("input", { value: s.name, maxlength: 24, "aria-label": "Nom de la section",
         onchange: e => { const v = e.target.value.trim(); if (v) { s.name = v; save(); } else e.target.value = s.name; } }),
-      h("button", { type: "button", class: "del", onclick: () => {
-        const n = state.tasks.filter(x => x.section === s.id).length;
-        if (!confirm(n ? `Supprimer « ${s.name} » ? Ses ${n} tâche(s) seront gardées, sans section.` : `Supprimer « ${s.name} » ?`)) return;
+      n ? h("span", { class: "n" }, plural(n, "tâche")) : null,
+      h("button", { type: "button", class: "txt danger", onclick: () => {
+        if (!confirm(n ? `Supprimer « ${s.name} » ? Ses tâches sont gardées, sans section.` : `Supprimer « ${s.name} » ?`)) return;
         state.sections = state.sections.filter(x => x !== s);
         state.tasks.forEach(x => { if (x.section === s.id) x.section = null; });
-        if (!state.sections.length) state.settings.view = "priority";
         save(); renderSections();
-      } }, "Supprimer")));
-    if (paletteFor === s.id) box.append(h("div", { class: "palette" }, COLORS.map(c =>
-      h("button", { type: "button", style: { "--c": c }, "aria-label": "Choisir cette couleur", "aria-pressed": s.color === c,
-        onclick: () => { s.color = c; paletteFor = null; save(); renderSections(); } }))));
-  }
+      } }, "Supprimer"));
+  }));
 }
 $("#add-section").addEventListener("submit", e => {
   e.preventDefault();
-  const name = e.target.name.value.trim();
+  const input = e.target.elements.secname;
+  const name = input.value.trim();
   if (!name) return;
-  const used = state.sections.map(s => s.color);
-  state.sections.push({ id: uid(), name, color: COLORS.find(c => !used.includes(c)) || COLORS[state.sections.length % COLORS.length] });
-  e.target.name.value = "";
+  state.sections.push({ id: uid(), name });
+  input.value = "";
   save(); renderSections();
 });
-
+for (const kind of ["morning", "evening"]) {
+  $(`#${kind}-on`).addEventListener("change", e => { state.settings[kind].on = e.target.checked; save(); syncAll(); });
+  $(`#${kind}-time`).addEventListener("change", e => { if (e.target.value) { state.settings[kind].time = e.target.value; save(); syncAll(); } });
+}
 function renderNotifBtn() {
   const b = $("#ask-notif");
-  if (!("Notification" in window)) { b.textContent = "Non disponible"; b.disabled = true; return; }
+  if (!("Notification" in window)) { b.hidden = true; return; }
   const p = Notification.permission;
-  b.textContent = p === "granted" ? "Activées" : p === "denied" ? "Bloquées" : "Activer";
+  b.textContent = p === "granted" ? "Notifications du navigateur : activées" : p === "denied" ? "Notifications du navigateur : bloquées" : "Activer les notifications du navigateur";
   b.disabled = p !== "default";
 }
-$("#ask-notif").addEventListener("click", async () => { await Notification.requestPermission(); renderNotifBtn(); });
-$("#default-time").addEventListener("change", e => { state.settings.defaultTime = e.target.value || "08:00"; save(); });
-$("#ntfy-topic").addEventListener("change", async e => {
+$("#ask-notif").addEventListener("click", async () => { await Notification.requestPermission(); renderNotifBtn(); scheduleLocal(); });
+$("#ntfy-topic").addEventListener("change", e => {
   const v = e.target.value.trim().replace(/[^-_A-Za-z0-9]/g, "");
   e.target.value = v;
   state.settings.ntfyTopic = v;
-  save();
-  await ntfySyncAll();
+  save(); syncAll();
   if (v) toast("Rappels ntfy activés");
 });
 $("#ntfy-test").addEventListener("click", async () => {
   const topic = state.settings.ntfyTopic;
   if (!topic) { toast("Indique d'abord un sujet ntfy"); $("#ntfy-topic").focus(); return; }
   try {
-    const r = await fetch("https://ntfy.sh/", { method: "POST", body: JSON.stringify({ topic, title: "Demain", message: "Les rappels fonctionnent ✓", tags: ["white_check_mark"], click: APP_URL }) });
-    toast(r.ok ? "Notification de test envoyée" : "ntfy a refusé l'envoi (" + r.status + ")");
+    const r = await fetch("https://ntfy.sh/", { method: "POST", body: JSON.stringify({ topic, title: "Demain", message: "Les rappels fonctionnent.", tags: ["white_check_mark"], click: APP_URL }) });
+    toast(r.ok ? "Test envoyé" : "ntfy a refusé l'envoi (" + r.status + ")");
   } catch (e) { toast("Pas de connexion à ntfy.sh"); }
 });
-
 $("#export-ics").addEventListener("click", () => {
   const items = state.tasks.filter(t => !t.done && t.remind && t.date === tomorrow());
   if (!items.length) { toast("Aucune tâche de demain n'a de rappel"); return; }
@@ -442,20 +437,19 @@ $("#export-ics").addEventListener("click", () => {
   const a = h("a", { href: URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/calendar" })), download: `rappels-${tomorrow()}.ics` });
   document.body.append(a); a.click(); a.remove();
 });
-
-function openSettings() {
-  paletteFor = null;
+$("#open-settings").addEventListener("click", () => {
   renderSections();
   renderNotifBtn();
-  $("#default-time").value = state.settings.defaultTime || "08:00";
+  for (const kind of ["morning", "evening"]) {
+    $(`#${kind}-on`).checked = state.settings[kind].on;
+    $(`#${kind}-time`).value = state.settings[kind].time;
+  }
   $("#ntfy-topic").value = state.settings.ntfyTopic || "";
-  openSheet("#settings-sheet");
-}
-$("#open-settings").addEventListener("click", openSettings);
+  openPanel("#settings-panel");
+});
 
 /* ---------- Navigation ---------- */
-$("#day-seg").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { tab = b.dataset.day; render(); } });
-$("#view-seg").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { state.settings.view = b.dataset.view; save(); render(); } });
+$("#days").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { tab = b.dataset.day; filter = null; resetAdd(); render(); } });
 
 let toastTimer = null;
 function toast(msg) {
@@ -467,23 +461,20 @@ function toast(msg) {
 }
 
 /* ---------- Démarrage ---------- */
-// Le matin, on ouvre sur la liste du jour ; à partir de 16 h, sur celle du lendemain.
-function defaultTab() {
-  const openToday = state.tasks.some(x => !x.done && x.date <= today());
-  return new Date().getHours() < 16 && openToday ? "today" : "tomorrow";
-}
+// La journée s'ouvre sur ce qu'il reste à faire ; à partir de 18 h, sur la liste du lendemain.
+const defaultTab = () => (openOn(today()).length && new Date().getHours() < 18) || new Date().getHours() < 12 ? "today" : "tomorrow";
 let lastDay = today();
 function refresh() {
   if (today() !== lastDay) { lastDay = today(); tab = defaultTab(); }
-  cleanup(); render(); scheduleLocal(); ntfySyncAll();
+  cleanup(); render(); syncAll();
 }
 tab = defaultTab();
+pick("#add-prio", 0);
 cleanup();
 render();
-scheduleLocal();
-ntfySyncAll();
+syncAll();
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
-window.addEventListener("online", ntfySyncAll);
+window.addEventListener("online", syncAll);
 window.addEventListener("storage", e => { if (e.key === KEY) { Object.assign(state, load()); render(); scheduleLocal(); } });
 setInterval(() => { if (today() !== lastDay) refresh(); }, 60000);
 
